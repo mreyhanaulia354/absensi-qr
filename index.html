@@ -397,18 +397,22 @@
       $("stopButton").disabled = true;
     }
 
-    async function onQrDecoded(decodedText) {
-      if (processing) return;
-      processing = true;
+   
+async function onQrDecoded(decodedText) {
+  if (processing) return;
+  processing = true;
 
-      await stopScanner();
+  await stopScanner();
 
-      try {
-        await submitToken(decodedText);
-      } finally {
-        processing = false;
-      }
-    }
+  try {
+    showMessage("QR terbaca. Mengirim absensi ke server...");
+    await submitToken(decodedText);
+  } catch (error) {
+    showMessage("Gagal memproses absensi: " + error.message, "error");
+  } finally {
+    processing = false;
+  }
+}
 
     async function submitToken(rawToken) {
       const token = String(rawToken || "").trim();
