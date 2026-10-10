@@ -1,0 +1,456 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Absensi QR</title>
+
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: Arial, sans-serif;
+      background: #f3f5f9;
+      color: #172033;
+    }
+
+    .container {
+      max-width: 680px;
+      margin: auto;
+    }
+
+    .card {
+      background: white;
+      border: 1px solid #e2e6ee;
+      border-radius: 16px;
+      padding: 20px;
+      margin-bottom: 16px;
+    }
+
+    h1 { font-size: 25px; margin-top: 0; }
+    h2 { font-size: 18px; }
+
+    .muted {
+      color: #657087;
+      line-height: 1.5;
+      font-size: 14px;
+    }
+
+    input, select, button {
+      width: 100%;
+      padding: 12px;
+      margin-top: 8px;
+      border: 1px solid #ccd3e0;
+      border-radius: 9px;
+      font-size: 15px;
+    }
+
+    button {
+      border: none;
+      background: #253e80;
+      color: white;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    button.secondary {
+      background: #e7ebf4;
+      color: #172033;
+    }
+
+    button:disabled {
+      opacity: .45;
+      cursor: not-allowed;
+    }
+
+    #reader {
+      width: 100%;
+      overflow: hidden;
+      border-radius: 10px;
+      margin-top: 12px;
+    }
+
+    #message {
+      padding: 12px;
+      margin-top: 12px;
+      border-radius: 9px;
+      background: #eef1f6;
+      line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+
+    .success { background: #e4f8e9 !important; color: #155c2b; }
+    .error { background: #fff0ed !important; color: #8b2115; }
+
+    .hidden { display: none; }
+
+    .field-label {
+      display: block;
+      margin-top: 12px;
+      font-weight: bold;
+      font-size: 14px;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="container">
+    <section class="card">
+      <h1>Absensi QR</h1>
+      <p class="muted">
+        Panel khusus admin untuk memindai kartu QR dan mencatat
+        kehadiran secara otomatis.
+      </p>
+
+      <form id="loginForm">
+        <label class="field-label" for="pin">
+          PIN admin
+        </label>
+        <input
+          id="pin"
+          type="password"
+          minlength="8"
+          placeholder="Masukkan PIN admin"
+          autocomplete="current-password"
+          required
+        >
+        <button type="submit" id="loginButton">
+          Masuk sebagai admin
+        </button>
+      </form>
+
+      <div id="loginMessage" class="muted"></div>
+    </section>
+
+    <section id="scannerPanel" class="card hidden">
+      <h2>Scanner kehadiran</h2>
+
+      <label class="field-label" for="jenis">
+        Jenis absensi
+      </label>
+      <select id="jenis">
+        <option value="MASUK">MASUK</option>
+        <option value="PULANG">PULANG</option>
+      </select>
+
+      <button id="startButton" type="button">
+        Nyalakan kamera
+      </button>
+      <button id="stopButton" type="button" class="secondary" disabled>
+        Matikan kamera
+      </button>
+
+      <div id="reader"></div>
+
+      <div id="message" role="status" aria-live="polite">
+        Login admin terlebih dahulu, lalu nyalakan kamera.
+      </div>
+
+      <h2 style="margin-top:24px">Uji token manual</h2>
+      <p class="muted">
+        Untuk pengujian atau jika kamera bermasalah, token dapat
+        dimasukkan langsung dari sheet Data_Kartu.
+      </p>
+      <input id="manualToken" placeholder="Tempel token kartu">
+      <button id="manualButton" type="button" class="secondary">
+        Catat token
+      </button>
+    </section>
+  </main>
+
+  <!-- POST dikirim melalui form ke iframe tersembunyi.
+       Browser tidak perlu membaca respons lintas situs. -->
+  <iframe
+    name="apiFrame"
+    id="apiFrame"
+    title="Koneksi backend"
+    class="hidden">
+  </iframe>
+
+  <form id="apiForm" method="POST" target="apiFrame" class="hidden">
+    <input name="action" id="apiAction">
+    <input name="requestId" id="apiRequestId">
+    <input name="pin" id="apiPin">
+    <input name="token" id="apiToken">
+    <input name="jenis" id="apiJenis">
+  </form>
+
+  <script>
+    // GANTI dengan URL web app Apps Script milikmu yang berakhiran /exec.
+    const API_URL = "https://script.google.com/macros/s/AKfycbxfL1U2tMtmPV9TuexC4Xjit2_bKqdN9pkTAJrpl43F4PnyalfGLqcgjR9GyvTtrN-evA/exec";
+
+    let adminPin = "";
+    let qrScanner = null;
+    let scannerRunning = false;
+    let processing = false;
+
+    const $ = id => document.getElementById(id);
+
+    function showMessage(message, type = "") {
+      const box = $("message");
+      box.textContent = message;
+      box.className = type;
+      box.id = "message";
+      box.setAttribute("role", "status");
+      box.setAttribute("aria-live", "polite");
+    }
+
+    function randomId() {
+      if (window.crypto && crypto.randomUUID) {
+        return crypto.randomUUID().replace(/-/g, "");
+      }
+
+      return Date.now().toString(36) +
+        Math.random().toString(36).slice(2) +
+        Math.random().toString(36).slice(2);
+    }
+
+    // GET digunakan khusus untuk membaca hasil POST.
+    function apiRead(params) {
+      return new Promise((resolve, reject) => {
+        const callbackName = "qrCallback_" + randomId();
+        const script = document.createElement("script");
+        let finished = false;
+
+        function cleanup() {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timer);
+          delete window[callbackName];
+          script.remove();
+        }
+
+        const timer = setTimeout(() => {
+          cleanup();
+          reject(new Error("Server tidak merespons. Periksa koneksi."));
+        }, 10000);
+
+        window[callbackName] = data => {
+          cleanup();
+          resolve(data);
+        };
+
+        const query = new URLSearchParams({
+          ...params,
+          callback: callbackName,
+          cacheBust: String(Date.now())
+        });
+
+        script.src = API_URL + "?" + query.toString();
+        script.onerror = () => {
+          cleanup();
+          reject(new Error("Gagal menghubungi server absensi."));
+        };
+
+        document.head.appendChild(script);
+      });
+    }
+
+    // Mengirim perintah melalui POST, lalu memeriksa hasilnya.
+    async function apiPost(data) {
+      const requestId = randomId();
+      const form = $("apiForm");
+
+      $("apiAction").value = data.action || "";
+      $("apiRequestId").value = requestId;
+      $("apiPin").value = data.pin || "";
+      $("apiToken").value = data.token || "";
+      $("apiJenis").value = data.jenis || "";
+
+      form.action = API_URL;
+      form.submit();
+
+      const deadline = Date.now() + 15000;
+
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 700));
+
+        const response = await apiRead({
+          action: "result",
+          requestId: requestId
+        });
+
+        if (response && response.pending === false) {
+          return response.result;
+        }
+      }
+
+      throw new Error(
+        "Hasil belum diterima. Buka Log_Absensi untuk memastikan apakah data tercatat."
+      );
+    }
+
+    $("loginForm").addEventListener("submit", async event => {
+      event.preventDefault();
+
+      if (API_URL.includes("TEMPEL_URL")) {
+        $("loginMessage").textContent =
+          "Masukkan URL Apps Script terlebih dahulu di dalam kode.";
+        return;
+      }
+
+      const candidate = $("pin").value.trim();
+      $("loginButton").disabled = true;
+      $("loginMessage").textContent = "Memeriksa PIN admin...";
+
+      try {
+        const result = await apiPost({
+          action: "auth",
+          pin: candidate
+        });
+
+        if (!result.ok) {
+          throw new Error(result.message || "PIN salah.");
+        }
+
+        adminPin = candidate;
+        $("pin").value = "";
+        $("loginForm").classList.add("hidden");
+        $("loginMessage").textContent = "Login berhasil.";
+        $("scannerPanel").classList.remove("hidden");
+
+        showMessage(
+          "Login berhasil. Pilih jenis absensi, lalu nyalakan kamera.",
+          "success"
+        );
+      } catch (error) {
+        $("loginMessage").textContent = error.message;
+      } finally {
+        $("loginButton").disabled = false;
+      }
+    });
+
+    async function startScanner() {
+      if (!adminPin || processing || scannerRunning) return;
+
+      if (typeof Html5Qrcode === "undefined") {
+        showMessage(
+          "Library scanner tidak berhasil dimuat. Periksa koneksi internet.",
+          "error"
+        );
+        return;
+      }
+
+      if (!qrScanner) {
+        qrScanner = new Html5Qrcode("reader", {
+          formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE]
+        });
+      }
+
+      const config = {
+        fps: 10,
+        qrbox: { width: 240, height: 240 }
+      };
+
+      try {
+        try {
+          await qrScanner.start(
+            { facingMode: "environment" },
+            config,
+            onQrDecoded
+          );
+        } catch (firstError) {
+          // Fallback untuk webcam laptop atau kamera yang berbeda.
+          const cameras = await Html5Qrcode.getCameras();
+          if (!cameras || !cameras.length) throw firstError;
+
+          await qrScanner.start(
+            cameras[0].id,
+            config,
+            onQrDecoded
+          );
+        }
+
+        scannerRunning = true;
+        $("startButton").disabled = true;
+        $("stopButton").disabled = false;
+        showMessage(
+          "Kamera aktif. Arahkan QR kartu ke kamera."
+        );
+
+      } catch (error) {
+        showMessage(
+          "Kamera gagal dibuka. Izinkan akses kamera di browser, " +
+          "pastikan halaman menggunakan HTTPS, lalu coba kembali. " +
+          String(error.message || error),
+          "error"
+        );
+      }
+    }
+
+    async function stopScanner() {
+      if (qrScanner && scannerRunning) {
+        try {
+          await qrScanner.stop();
+        } catch (error) {
+          console.log(error);
+        }
+      }
+
+      scannerRunning = false;
+      $("startButton").disabled = false;
+      $("stopButton").disabled = true;
+    }
+
+    async function onQrDecoded(decodedText) {
+      if (processing) return;
+      processing = true;
+
+      await stopScanner();
+
+      try {
+        await submitToken(decodedText);
+      } finally {
+        processing = false;
+      }
+    }
+
+    async function submitToken(rawToken) {
+      const token = String(rawToken || "").trim();
+
+      if (!token) {
+        showMessage("Token kosong.", "error");
+        return;
+      }
+
+      showMessage("Mengirim absensi ke server...");
+
+      try {
+        const result = await apiPost({
+          action: "scan",
+          pin: adminPin,
+          token: token,
+          jenis: $("jenis").value
+        });
+
+        if (!result.ok) {
+          showMessage(result.message || "Absensi ditolak.", "error");
+        } else {
+          showMessage(result.message, "success");
+        }
+      } catch (error) {
+        showMessage(error.message, "error");
+      }
+    }
+
+    $("startButton").addEventListener("click", startScanner);
+    $("stopButton").addEventListener("click", stopScanner);
+
+    $("manualButton").addEventListener("click", async () => {
+      if (!adminPin || processing) return;
+      processing = true;
+
+      try {
+        await submitToken($("manualToken").value);
+      } finally {
+        processing = false;
+      }
+    });
+  </script>
+</body>
+</html>
