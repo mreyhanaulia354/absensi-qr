@@ -414,33 +414,47 @@ async function onQrDecoded(decodedText) {
   }
 }
 
-    async function submitToken(rawToken) {
-      const token = String(rawToken || "").trim();
+    
+function extractToken(raw) {
+  const text = String(raw || "").trim().toUpperCase();
 
-      if (!token) {
-        showMessage("Token kosong.", "error");
-        return;
-      }
+  // Jika QR langsung berisi token.
+  if (/^[A-F0-9]{32}$/.test(text)) {
+    return text;
+  }
 
-      showMessage("Mengirim absensi ke server...");
+  // Jika token berada di dalam URL atau teks lain.
+  const match = text.match(/[A-F0-9]{32}/);
+  return match ? match[0] : "";
+}
 
-      try {
-        const result = await apiPost({
-          action: "scan",
-          pin: adminPin,
-          token: token,
-          jenis: $("jenis").value
-        });
+async function onQrDecoded(decodedText) {
+  if (processing) return;
+  processing = true;
 
-        if (!result.ok) {
-          showMessage(result.message || "Absensi ditolak.", "error");
-        } else {
-          showMessage(result.message, "success");
-        }
-      } catch (error) {
-        showMessage(error.message, "error");
-      }
+  await stopScanner();
+
+  try {
+    const token = extractToken(decodedText);
+
+    if (!token) {
+      showMessage(
+        "QR terbaca, tetapi bukan token yang valid. " +
+        "Periksa QR pada sheet Kartu_QR.",
+        "error"
+      );
+      return;
     }
+
+    showMessage("Token ditemukan. Mengirim absensi ke server...");
+    await submitToken(token);
+
+  } catch (error) {
+    showMessage("Gagal memproses QR: " + error.message, "error");
+  } finally {
+    processing = false;
+  }
+}
 
     $("startButton").addEventListener("click", startScanner);
     $("stopButton").addEventListener("click", stopScanner);
